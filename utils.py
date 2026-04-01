@@ -1,12 +1,7 @@
 """
-utils.py — Shared utilities for the WikiArt artist classification project.
+utils.py - Shared utilities for the project.
 
-Only includes functions reused across multiple notebooks (data loading,
-training curves, evaluation, model comparison, Grad-CAM, history I/O).
-EDA and one-off preprocessing live in their respective notebooks.
-
-Usage:
-    from utils import *
+Usage:  from utils import *
 """
 
 import os
@@ -19,6 +14,7 @@ import seaborn as sns
 import tensorflow as tf
 import keras
 from sklearn.metrics import (
+    accuracy_score,
     classification_report,
     confusion_matrix,
     f1_score,
@@ -45,15 +41,14 @@ def load_datasets(
     train_dir: str,
     val_dir: str,
     test_dir: str,
-    img_size: tuple = (224, 224),
-    batch_size: int = 32,
+    img_size: tuple,
+    batch_size: int,
     seed: int = 42,
-    shuffle_buffer: int = 1000,
 ):
     """
-    Load train/val/test as tf.data.Dataset with categorical labels,
-    .cache(), .shuffle() (train only), and .prefetch().
+    Load train/val/test as tf.data.Dataset with categorical labels.
     Returns (train_ds, val_ds, test_ds, class_names).
+    Does NOT apply cache/shuffle/prefetch - do that in the notebook.
     """
     common = dict(image_size=img_size, batch_size=batch_size,
                   label_mode="categorical", seed=seed)
@@ -65,11 +60,6 @@ def load_datasets(
     class_names = train_ds.class_names
     print(f"Classes ({len(class_names)}): {class_names}")
 
-    autotune = tf.data.AUTOTUNE
-    train_ds = train_ds.cache().shuffle(shuffle_buffer, seed=seed).prefetch(autotune)
-    val_ds = val_ds.cache().prefetch(autotune)
-    test_ds = test_ds.cache().prefetch(autotune)
-
     return train_ds, val_ds, test_ds, class_names
 
 
@@ -79,9 +69,8 @@ def load_datasets(
 
 def plot_learning_curves(history, title: str = ""):
     """
-    Plot loss, accuracy, and macro F1 from a Keras History object.
-    Accepts a single History, a list of Histories (concatenated),
-    or a raw dict (from load_history).
+    Plot loss, accuracy, and macro F1 (3 subplots). Prints best epoch.
+    Accepts a History, a list of Histories, or a dict from load_history().
     """
     if isinstance(history, (list, tuple)):
         combined = {}
@@ -141,19 +130,11 @@ def plot_learning_curves(history, title: str = ""):
 
 def evaluate_model(model, test_ds, class_names: list[str], model_name: str = "Model"):
     """
-    Full test evaluation: model.evaluate, classification report,
-    confusion matrix, and per-class F1 chart.
-    Returns a metrics dict for use with compare_models().
+    Full test evaluation: prints metrics, classification report,
+    confusion matrix, and per-class F1 bar chart.
+    Returns a metrics dict for compare_models().
     """
-    results = model.evaluate(test_ds, verbose=0)
-    metric_names = model.metrics_names
-
-    print(f"\n{'='*50}")
-    print(f"  {model_name} — Test Evaluation")
-    print(f"{'='*50}")
-    for name, val in zip(metric_names, results):
-        print(f"  {name:>12s}: {val:.4f}")
-
+    # Collect predictions
     y_true, y_pred_probs = [], []
     for images, labels in test_ds:
         preds = model.predict(images, verbose=0)
@@ -164,19 +145,31 @@ def evaluate_model(model, test_ds, class_names: list[str], model_name: str = "Mo
     y_pred_probs = np.array(y_pred_probs)
     y_pred = np.argmax(y_pred_probs, axis=1)
 
+    # Compute metrics from predictions (avoids Keras metric name issues)
+    test_loss = model.evaluate(test_ds, verbose=0)[0]
+    test_acc = accuracy_score(y_true, y_pred)
+    test_f1 = f1_score(y_true, y_pred, average="macro")
+
+    print(f"\n{'='*50}")
+    print(f"  {model_name} - Test Evaluation")
+    print(f"{'='*50}")
+    print(f"  Test Loss:     {test_loss:.4f}")
+    print(f"  Test Accuracy: {test_acc:.4f}")
+    print(f"  Test F1 Macro: {test_f1:.4f}")
+
     print(f"\nClassification Report:")
     print(classification_report(y_true, y_pred, target_names=class_names))
 
     plot_confusion_matrix(y_true, y_pred, class_names,
-                          title=f"Confusion Matrix — {model_name}")
+                          title=f"Confusion Matrix - {model_name}")
     plot_per_class_f1(y_true, y_pred, class_names,
-                      title=f"Per-Class F1 — {model_name}")
+                      title=f"Per-Class F1 - {model_name}")
 
     return {
         "model_name": model_name,
-        "test_loss": results[metric_names.index("loss")],
-        "test_accuracy": results[metric_names.index("accuracy")],
-        "test_f1_macro": f1_score(y_true, y_pred, average="macro"),
+        "test_loss": test_loss,
+        "test_accuracy": test_acc,
+        "test_f1_macro": test_f1,
         "y_true": y_true,
         "y_pred": y_pred,
         "y_pred_probs": y_pred_probs,
@@ -189,7 +182,7 @@ def plot_confusion_matrix(
     normalize: bool = False,
     figsize: tuple = (14, 12),
 ):
-    """Confusion matrix heatmap. Set normalize=True for row-percentages."""
+    """Confusion matrix heatmap. normalize=True for row-wise percentages."""
     cm = confusion_matrix(y_true, y_pred)
     fmt = "d"
     if normalize:
@@ -208,7 +201,7 @@ def plot_confusion_matrix(
 
 
 def plot_per_class_f1(y_true, y_pred, class_names: list[str], title: str = ""):
-    """Horizontal bar chart of per-class F1 scores, sorted ascending."""
+    """Horizontal bar chart of per-class F1, sorted ascending, color-coded."""
     report = classification_report(y_true, y_pred, target_names=class_names,
                                    output_dict=True)
     f1_scores = {cls: report[cls]["f1-score"] for cls in class_names}
@@ -236,8 +229,7 @@ def plot_per_class_f1(y_true, y_pred, class_names: list[str], title: str = ""):
 
 def compare_models(metrics_list: list[dict]):
     """
-    Print comparison table + bar chart from a list of metrics dicts
-    (each returned by evaluate_model).
+    Comparison table + bar chart from a list of evaluate_model() dicts.
     """
     print(f"\n{'='*65}")
     print(f"  Model Comparison")
@@ -281,97 +273,14 @@ def compare_models(metrics_list: list[dict]):
 
 
 # ============================================================
-# Grad-CAM
-# ============================================================
-
-def make_gradcam_heatmap(model, img_array, last_conv_layer_name: str, pred_index=None):
-    """
-    Compute Grad-CAM heatmap. img_array shape: (1, H, W, 3), already preprocessed.
-    """
-    grad_model = keras.Model(
-        model.inputs,
-        [model.get_layer(last_conv_layer_name).output, model.output],
-    )
-    with tf.GradientTape() as tape:
-        conv_outputs, predictions = grad_model(img_array)
-        if pred_index is None:
-            pred_index = tf.argmax(predictions[0])
-        class_channel = predictions[:, pred_index]
-
-    grads = tape.gradient(class_channel, conv_outputs)
-    pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
-    heatmap = conv_outputs[0] @ pooled_grads[..., tf.newaxis]
-    heatmap = tf.squeeze(heatmap)
-    heatmap = tf.maximum(heatmap, 0) / (tf.math.reduce_max(heatmap) + 1e-8)
-    return heatmap.numpy()
-
-
-def plot_gradcam(
-    model,
-    img_path: str,
-    last_conv_layer_name: str,
-    img_size: tuple = (224, 224),
-    preprocess_fn=None,
-    class_names: list[str] | None = None,
-    alpha: float = 0.4,
-):
-    """
-    End-to-end Grad-CAM: load image, compute heatmap, show overlay.
-
-    preprocess_fn: e.g. tf.keras.applications.resnet50.preprocess_input.
-                   If None, divides by 255.
-    """
-    img = tf.keras.utils.load_img(img_path, target_size=img_size)
-    img_array = tf.keras.utils.img_to_array(img)
-    display_img = img_array.astype("uint8")
-
-    img_input = np.expand_dims(img_array, axis=0)
-    if preprocess_fn is not None:
-        img_input = preprocess_fn(img_input.copy())
-    else:
-        img_input = img_input / 255.0
-
-    preds = model.predict(img_input, verbose=0)
-    pred_idx = np.argmax(preds[0])
-    pred_conf = preds[0][pred_idx]
-    pred_label = class_names[pred_idx] if class_names else str(pred_idx)
-
-    heatmap = make_gradcam_heatmap(model, img_input, last_conv_layer_name,
-                                   pred_index=pred_idx)
-    heatmap_resized = np.uint8(255 * heatmap)
-    heatmap_resized = tf.image.resize(
-        heatmap_resized[..., np.newaxis], img_size
-    ).numpy().squeeze()
-
-    jet = plt.cm.get_cmap("jet")
-    jet_colors = jet(np.arange(256))[:, :3]
-    jet_heatmap = (jet_colors[heatmap_resized.astype(int)] * 255).astype("uint8")
-    superimposed = (jet_heatmap * alpha + display_img * (1 - alpha)).astype("uint8")
-
-    fig, axes = plt.subplots(1, 3, figsize=(14, 4))
-    axes[0].imshow(display_img)
-    axes[0].set_title("Original")
-    axes[0].axis("off")
-
-    axes[1].imshow(heatmap_resized, cmap="jet")
-    axes[1].set_title("Grad-CAM Heatmap")
-    axes[1].axis("off")
-
-    axes[2].imshow(superimposed)
-    axes[2].set_title(f"Pred: {pred_label.replace('_', ' ')} ({pred_conf:.2%})")
-    axes[2].axis("off")
-
-    plt.suptitle("Grad-CAM Visualization", fontsize=13)
-    plt.tight_layout()
-    plt.show()
-
-
-# ============================================================
 # History Serialization
 # ============================================================
 
 def save_history(history, filepath: str):
-    """Save Keras History (or list of Histories) to JSON."""
+    """
+    Save training history to JSON. Accepts a History, list of Histories,
+    or dict. Useful to re-plot curves without re-training.
+    """
     if isinstance(history, (list, tuple)):
         combined = {}
         for h in history:
@@ -389,6 +298,6 @@ def save_history(history, filepath: str):
 
 
 def load_history(filepath: str) -> dict:
-    """Load a previously saved history dict from JSON."""
+    """Load saved history dict from JSON. Pass to plot_learning_curves()."""
     with open(filepath, "r") as f:
         return json.load(f)
